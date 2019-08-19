@@ -1,20 +1,22 @@
 import asyncio
-import collections
 import concurrent.futures
 import sys
+import os
+from io import BytesIO
 
+import aiohttp
 import docker
-import requests
 from zipfile import ZipFile
-from pathlib import Path
-from hyper.contrib import HTTP20Adapter
+from pathlib import Path, PurePosixPath
+
+from docker import DockerClient
 
 API_VERSION = "v1"
 PROJECT_NAME_LIST = ["paper", "waterfall", "travertine"]
 
 OUTPUT_DIRECTORY = "./output"
-DOWNLOAD_DIRECTORY = f"{OUTPUT_DIRECTORY}/download"
-GENERATED_DIRECTORY = f"{OUTPUT_DIRECTORY}/generated"
+# DOWNLOAD_DIRECTORY = f"{OUTPUT_DIRECTORY}/download"
+# GENERATED_DIRECTORY = f"{OUTPUT_DIRECTORY}/generated"
 
 HOST = "https://papermc.io/"
 
@@ -28,43 +30,52 @@ BASE_DOCKER_IMAGE_DICTIONARY = {
 }
 
 
-async def download_jar(project_name, version, build, build_download_url, session):
-    download_path = Path(f"{DOWNLOAD_DIRECTORY}/{project_name}/{version}")
-    download_path.mkdir(parents=True, exist_ok=True)
+async def download_jar(
+    build_number, build_download_url, project_name, session, version
+):
+    download_path = Path(f"{OUTPUT_DIRECTORY}/{project_name}/{version}")
 
-    jar_name = f"{project_name}-{version}-{build}.jar"
+    jar_name = f"{project_name}-{version}-{build_number}.jar"
     jar_path = Path(f"{download_path}/{jar_name}")
+
+    print(f"    Checking... {jar_path}")
 
     if not (
         jar_path.exists() and jar_path.is_file() and not ZipFile(jar_path).testzip()
     ):
         print(f"  Downloading... {jar_path}")
-        build_download_response = session.get(build_download_url)
-        jar_path.write_bytes(build_download_response.content)
+        async with download_path.mkdir(parents=True, exist_ok=True):
+            async with session.get(build_download_url) as build_download_response:
+                jar_path.write_bytes(await build_download_response.read())
         print(f"  Downloaded: {jar_path}")
 
     return jar_path
 
 
-async def generate_dockerfile(build_directory, base_image_name, jar_path):
-    print(f"  Creating... {build_directory}")
-
-    build_directory_path = Path(build_directory)
-    build_directory_path.mkdir(parents=True, exist_ok=True)
-
-    DOCKERFILE_CONTENT = f"""FROM {base_image_name}
-ADD {jar_path.relative_to(OUTPUT_DIRECTORY)} /
+async def generate_dockerfile(
+    build_number: str,
+    build_directory_path: Path,
+    base_image_name: str,
+    base_image_type: str,
+    jar_path: Path,
+):
+    dockerfile_content = f"""FROM {base_image_name}
+ADD ["{jar_path.name}", "/"]
 ENTRYPOINT ["{jar_path.name}"]"""
 
-    dockerfile = build_directory_path.joinpath("Dockerfile")
-    dockerfile.write(DOCKERFILE_CONTENT)
+    dockerfile = build_directory_path.joinpath(
+        f"{base_image_type}.{build_number}.Dockerfile"
+    )
+    dockerfile.write_text(dockerfile_content)
 
-    print(f"  Created: {build_directory}")
+    return dockerfile
 
 
-async def build_docker_image(docker_client, docker_tag, dockerfile_path):
-    image, logs = docker_client.build(
-        dockerfile=dockerfile_path, tag=docker_tag, pull=True
+async def build_docker_image(
+    dockerfile_path: Path, docker_client: DockerClient, docker_tag: str
+):
+    [image, logs] = docker_client.images.build(
+        fileobj=BytesIO(dockerfile_path.read_bytes()), tag=docker_tag, pull=True
     )
     return image
 
@@ -72,89 +83,92 @@ async def build_docker_image(docker_client, docker_tag, dockerfile_path):
 async def create_image(
     base_image_name,
     base_image_type,
-    build,
+    build_directory_path,
+    build_number,
     docker_client,
+    jar_path,
     project_name,
-    session,
     version,
-    version_url,
 ):
-    build_download_url = f"{version_url}/{build}/download"
-
-    build_directory = (
-        f"{GENERATED_DIRECTORY}/{base_image_type}/{project_name}/{version}/{build}"
-    )
-
-    jar_path = await download_jar(
-        project_name, version, build, build_download_url, session
-    )
 
     dockerfile_path = await generate_dockerfile(
-        build_directory, base_image_name, jar_path
+        build_number, build_directory_path, base_image_name, base_image_type, jar_path
     )
 
-    docker_tag = f"{project_name}:{version}-{build}-{base_image_type}"
-    await build_docker_image(docker_client, docker_tag, dockerfile_path)
+    docker_tag = f"{project_name}:{version}-{build_number}-{base_image_type}"
+    # await build_docker_image(dockerfile_path, docker_client, docker_tag)
+
+    # print(f"  Created: {build_directory}")
 
 
-async def main(docker_client, session):
+async def main(docker_client,):
     print("Starting...")
 
-    all_create_image_coroutines = []
+    async with aiohttp.ClientSession() as session:
 
-    for PROJECT_NAME in PROJECT_NAME_LIST:
-        project_url = f"{HOST}api/{API_VERSION}/{PROJECT_NAME}"
+        for PROJECT_NAME in PROJECT_NAME_LIST:
+            project_url = f"{HOST}api/{API_VERSION}/{PROJECT_NAME}"
 
-        project_response = session.get(project_url)
-        project_response_json = project_response.json()
+            async with session.get(project_url) as project_response:
+                project_response_json = await project_response.json()
 
-        for version in project_response_json["versions"]:
-            version_url = f"{project_url}/{version}"
+                for version in project_response_json["versions"]:
+                    version_url = f"{project_url}/{version}"
 
-            version_response = session.get(version_url)
-            version_response_json = version_response.json()
+                    async with session.get(version_url) as version_response:
+                        version_response_json = await version_response.json()
 
-            for (
-                base_image_type,
-                base_image_name,
-            ) in BASE_DOCKER_IMAGE_DICTIONARY.items():
-                all_builds = version_response_json["builds"]["all"]  # + ["latest"]
+                        build_directory = f"{OUTPUT_DIRECTORY}/{PROJECT_NAME}/{version}"
+                        print(f"  Creating... {build_directory}")
 
-                create_image_coroutines = [
-                    create_image(
-                        base_image_name,
-                        base_image_type,
-                        build,
-                        docker_client,
-                        PROJECT_NAME,
-                        session,
-                        version,
-                        version_url,
-                    )
-                    for build in all_builds
-                ]
+                        build_directory_path = Path(build_directory)
+                        build_directory_path.mkdir(parents=True, exist_ok=True)
 
-                all_create_image_coroutines = (
-                    all_create_image_coroutines + create_image_coroutines
-                )
+                        all_builds = version_response_json["builds"]["all"]
 
-    return asyncio.gather(*all_create_image_coroutines)
-    # print("Finished!")
+                        for build_number in all_builds:
+                            build_download_url = (
+                                f"{version_url}/{build_number}/download"
+                            )
+                            jar_path = await download_jar(
+                                build_number,
+                                build_download_url,
+                                PROJECT_NAME,
+                                session,
+                                version,
+                            )
+
+                            for (
+                                base_image_type,
+                                base_image_name,
+                            ) in BASE_DOCKER_IMAGE_DICTIONARY.items():
+
+                                await create_image(
+                                    base_image_name,
+                                    base_image_type,
+                                    build_directory_path,
+                                    build_number,
+                                    docker_client,
+                                    jar_path,
+                                    PROJECT_NAME,
+                                    version,
+                                )
+                        print(f"  Created: {build_directory}")
+
+    print("Finished!")
+    # return asyncio.gather(all_create_image_coroutines)
 
 
 if __name__ == "__main__":
     assert sys.version_info >= (3, 7), "Script requires Python 3.7+."
-
-    session = requests.Session()
-    session.mount(HOST, HTTP20Adapter())
-
-    docker_client = docker.from_env()
+    assert os.name is "posix", "Script requires *NIX"
+    env_docker_client = docker.from_env()
 
     event_loop = asyncio.get_event_loop()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         event_loop.set_default_executor(pool)
-        event_loop.run_until_complete(main(docker_client, session))
+        event_loop.run_until_complete(main(env_docker_client))
         # event_loop.run_in_executor(pool, main(docker_client, session))
 
     # event_loop.run_until_complete(main(docker_client, session))
