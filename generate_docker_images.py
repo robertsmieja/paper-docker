@@ -31,8 +31,12 @@ BASE_DOCKER_IMAGE_DICTIONARY = {
 
 
 async def download_jar(
-    build_number, build_download_url, project_name, session, version
-):
+    build_number: str,
+    build_download_url: str,
+    project_name: str,
+    session: aiohttp.ClientSession,
+    version: str,
+) -> Path:
     download_path = Path(f"{OUTPUT_DIRECTORY}/{project_name}/{version}")
 
     jar_name = f"{project_name}-{version}-{build_number}.jar"
@@ -43,11 +47,11 @@ async def download_jar(
     if not (
         jar_path.exists() and jar_path.is_file() and not ZipFile(jar_path).testzip()
     ):
-        print(f"  Downloading... {jar_path}")
-        async with download_path.mkdir(parents=True, exist_ok=True):
-            async with session.get(build_download_url) as build_download_response:
-                jar_path.write_bytes(await build_download_response.read())
-        print(f"  Downloaded: {jar_path}")
+        print(f"    Downloading... {jar_path}")
+        download_path.mkdir(parents=True, exist_ok=True)
+        async with session.get(build_download_url) as build_download_response:
+            jar_path.write_bytes(await build_download_response.read())
+        print(f"    Downloaded: {jar_path}")
 
     return jar_path
 
@@ -58,22 +62,22 @@ async def generate_dockerfile(
     base_image_name: str,
     base_image_type: str,
     jar_path: Path,
-):
+) -> Path:
     dockerfile_content = f"""FROM {base_image_name}
 ADD ["{jar_path.name}", "/"]
 ENTRYPOINT ["{jar_path.name}"]"""
 
-    dockerfile = build_directory_path.joinpath(
+    dockerfile_path = build_directory_path.joinpath(
         f"{base_image_type}.{build_number}.Dockerfile"
     )
-    dockerfile.write_text(dockerfile_content)
+    dockerfile_path.write_text(dockerfile_content)
 
-    return dockerfile
+    return dockerfile_path
 
 
 async def build_docker_image(
     dockerfile_path: Path, docker_client: DockerClient, docker_tag: str
-):
+) -> docker.models.images.Image:
     [image, logs] = docker_client.images.build(
         fileobj=BytesIO(dockerfile_path.read_bytes()), tag=docker_tag, pull=True
     )
@@ -81,15 +85,15 @@ async def build_docker_image(
 
 
 async def create_image(
-    base_image_name,
-    base_image_type,
-    build_directory_path,
-    build_number,
-    docker_client,
-    jar_path,
-    project_name,
-    version,
-):
+    base_image_name: str,
+    base_image_type: str,
+    build_directory_path: Path,
+    build_number: str,
+    docker_client: docker.DockerClient,
+    jar_path: Path,
+    project_name: str,
+    version: str,
+) -> None:
 
     dockerfile_path = await generate_dockerfile(
         build_number, build_directory_path, base_image_name, base_image_type, jar_path
@@ -101,7 +105,7 @@ async def create_image(
     # print(f"  Created: {build_directory}")
 
 
-async def main(docker_client,):
+async def main(docker_client: docker.DockerClient) -> None:
     print("Starting...")
 
     async with aiohttp.ClientSession() as session:
