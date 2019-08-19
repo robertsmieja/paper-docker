@@ -1,8 +1,9 @@
 import asyncio
+import collections
 import concurrent.futures
+import sys
+
 import docker
-import os
-import json
 import requests
 from zipfile import ZipFile
 from pathlib import Path
@@ -16,7 +17,6 @@ DOWNLOAD_DIRECTORY = f"{OUTPUT_DIRECTORY}/download"
 GENERATED_DIRECTORY = f"{OUTPUT_DIRECTORY}/generated"
 
 HOST = "https://papermc.io/"
-
 
 BASE_DOCKER_IMAGE_DICTIONARY = {
     "java8-distroless": "gcr.io/distroless/java:8",
@@ -143,6 +143,8 @@ async def main(docker_client, session):
 
 
 if __name__ == "__main__":
+    assert sys.version_info >= (3, 7), "Script requires Python 3.7+."
+
     session = requests.Session()
     session.mount(HOST, HTTP20Adapter())
 
