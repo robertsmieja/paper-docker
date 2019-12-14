@@ -166,7 +166,7 @@ async def main(docker_client: docker.DockerClient) -> None:
 
 if __name__ == "__main__":
     assert sys.version_info >= (3, 7), "Script requires Python 3.7+."
-    assert os.name is "posix", "Script requires *NIX"
+    assert os.name == "posix", "Script requires *NIX"
     env_docker_client = docker.from_env()
 
     event_loop = asyncio.get_event_loop()
