@@ -23,7 +23,7 @@ mypy==0.720
 mypy-extensions==0.4.1
 pycares==3.0.0
 pycparser==2.19
-PyYAML==5.1.2
+PyYAML==5.4
 requests==2.22.0
 six==1.12.0
 toml==0.10.0
